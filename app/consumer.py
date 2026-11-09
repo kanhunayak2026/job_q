@@ -3,6 +3,8 @@ import json
 import time
 import os
 import resend
+from app.database import SessionLocal
+from app.model import Job
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,16 +43,55 @@ def send_to_dl(job,error):
     producer.flush()
     print(f"job send to DLQ:{job['job_id']}")
 
+
 for message in consumer:
-    job=message.value
-    for attempt in range(1,max_attempts+1):
-        try:
-            process_job(job)
-            print(f"job completed:{job['job_id']}")
-            break
-        except Exception as error:
-            print(f"attempt {attempt} failed"f"for job{job['job_id']}:{error}")
-            if attempt==max_attempts:
-                send_to_dl(job,error)
-            else:
-                time.sleep(2**(attempt-1))
+    job = message.value
+
+    db = SessionLocal()
+
+    try:
+        db_job = db.query(Job).filter(
+            Job.job_id == job["job_id"]
+        ).first()
+
+        if db_job is None:
+            print(f"Job not found in MySQL: {job['job_id']}")
+            continue
+
+        db_job.status = "processing"
+        db.commit()
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                db_job.attempts = attempt
+                db.commit()
+
+                process_job(job)
+
+                db_job.status = "completed"
+                db_job.last_error = None
+                db.commit()
+
+                print(f"Job completed: {job['job_id']}")
+                break
+
+            except Exception as error:
+                db_job.last_error = str(error)
+                db.commit()
+
+                print(
+                    f"Attempt {attempt} failed for "
+                    f"job {job['job_id']}: {error}"
+                )
+
+                if attempt == max_attempts:
+                    send_to_dl(job, error)
+
+                    db_job.status = "dead"
+                    db.commit()
+
+                else:
+                    time.sleep(2 ** (attempt - 1))
+
+    finally:
+        db.close()
