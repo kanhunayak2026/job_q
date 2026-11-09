@@ -28,4 +28,6 @@ class Job(Base):
         server_default=func.now(),
         onupdate=func.now()
     )
+    lease_until = Column(DateTime, nullable=True)
+    locked_by = Column(String(100), nullable=True)
 
